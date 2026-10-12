@@ -1,0 +1,679 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Reflection;
+
+namespace ECS
+{
+    public class SystemInfo
+    {
+        public IEcsSystem System { get; set; }
+        public MethodInfo Action { get; set; }
+        /// <summary>
+        /// 如果非空，实体必须拥有所有这些组件才会触发该 System 的 IDrive 回调。
+        /// </summary>
+        public Type[] RequiredComponentTypes { get; set; }
+
+        /// <summary>显式执行顺序（来自 <see cref="SystemOrderAttribute"/>，未标注为 0）。</summary>
+        public int Order { get; set; }
+
+        /// <summary>所属驱动相位（来自 <see cref="SystemPhaseAttribute"/>，未标注为 0）。</summary>
+        public int Phase { get; set; }
+    }
+
+    public abstract class EcsNode : EcsEntity
+    {
+        public int TimeIdIndex { get; private set; }
+        public long InstanceIdIndex { get; private set; }
+        public long IdBaseTime { get; private set; }
+        public ushort EcsTypeId { get; private set; }
+
+        public const int Mask14bit = 0x3fff;
+        public const int Mask30bit = 0x3fffffff;
+        public const int Mask20bit = 0xfffff;
+
+        public EcsNode(ushort ecsTypeId)
+        {
+            this.EcsTypeId = ecsTypeId;
+            this.InstanceId = NewInstanceId();
+            this.IdBaseTime = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks / 10000;
+        }
+
+        public long NewInstanceId()
+        {
+            return ++InstanceIdIndex;
+        }
+
+        public long NewEntityId()
+        {
+            uint timeAddition = (uint)((DateTime.UtcNow.Ticks / 10000 - this.IdBaseTime) / 1000);
+            int v = 0;
+            lock (this)
+            {
+                if (++TimeIdIndex > Mask20bit - 1)
+                {
+                    TimeIdIndex = 0;
+                }
+                v = TimeIdIndex;
+            }
+
+            ulong result = 0;
+            result |= EcsTypeId;
+            result <<= 30;
+            result |= timeAddition;
+            result <<= 20;
+            result |= (uint)TimeIdIndex;
+            return (long)result;
+        }
+
+        public Dictionary<long, EcsEntity> AllEntities { get; set; } = new Dictionary<long, EcsEntity>();
+        public Dictionary<Type, List<EcsEntity>> Type2Entities { get; set; } = new Dictionary<Type, List<EcsEntity>>();
+
+        public Dictionary<Type, IEcsSystem> AllSystems { get; set; } = new Dictionary<Type, IEcsSystem>();
+        public Dictionary<Type, List<IEcsSystem>> EntityType2Systems { get; set; } = new Dictionary<Type, List<IEcsSystem>>();
+        public Dictionary<(Type, Type), List<IEcsSystem>> EntityComponentType2Systems { get; set; } = new Dictionary<(Type, Type), List<IEcsSystem>>();
+        public Dictionary<Type, Dictionary<Type, List<SystemInfo>>> AllEntitySystems { get; set; } = new Dictionary<Type, Dictionary<Type, List<SystemInfo>>>();
+        public Dictionary<(Type, Type), Dictionary<string, SystemInfo>> AllEntityComponentSystems { get; set; } = new Dictionary<(Type, Type), Dictionary<string, SystemInfo>>();
+        public Dictionary<Type, List<SystemInfo>> AllUpdateSystems { get; set; } = new Dictionary<Type, List<SystemInfo>>();
+        public Dictionary<Type, List<SystemInfo>> AllFixedUpdateSystems { get; set; } = new Dictionary<Type, List<SystemInfo>>();
+        public List<Type> DriveTypes { get; set; } = new List<Type>();
+        public Type[] AllTypes { get; set; }
+
+        public void AddEntity(EcsEntity entity)
+        {
+            var ecsNode = entity.EcsNode;
+            ecsNode.AllEntities.Add(entity.Id, entity);
+            var entityType = entity.GetType();
+            if (!ecsNode.Type2Entities.TryGetValue(entityType, out var list))
+            {
+                list = new List<EcsEntity>();
+                ecsNode.Type2Entities.Add(entityType, list);
+            }
+            list.Add(entity);
+            if (ecsNode.UpdateEntityTypes.Contains(entityType))
+            {
+                ecsNode.AddEntities.Enqueue(entity);
+            }
+        }
+
+        public EcsEntity GetEntity(long id)
+        {
+            if (AllEntities.TryGetValue(id, out var entity))
+            {
+                return entity;
+            }
+            return null;
+        }
+
+        public void RemoveEntity(EcsEntity entity)
+        {
+            var ecsNode = entity.EcsNode;
+            ecsNode.AllEntities.Remove(entity.Id);
+            var entityType = entity.GetType();
+            if (ecsNode.Type2Entities.TryGetValue(entityType, out var list))
+            {
+                list.Remove(entity);
+                if (ecsNode.UpdateEntityTypes.Contains(entityType))
+                {
+                    ecsNode.RemoveEntities.Enqueue(entity);
+                }
+            }
+        }
+
+        public void RegisterDrives(Type[] types)
+        {
+            var driveTypes = new List<Type>();
+            foreach (var driveType in types)
+            {
+                if (!driveType.IsInterface)
+                {
+                    continue;
+                }
+                if (driveType.ContainsGenericParameters)
+                {
+                    continue;
+                }
+                var interfaces = driveType.GetInterfaces();
+                if (interfaces.Length == 0)
+                {
+                    continue;
+                }
+
+                if (interfaces.Contains(typeof(IDrive)))
+                {
+                    driveTypes.Add(driveType);
+                    //ConsoleLog.Debug($"RegisterDrives {driveType.Name}");
+                }
+            }
+
+            DriveTypes = driveTypes;
+        }
+
+        public void RegisterSystems(Type[] types)
+        {
+            AllTypes = types;
+
+            var allSystems = new Dictionary<Type, IEcsSystem>();
+            var entityType2Systems = new Dictionary<Type, List<IEcsSystem>>();
+            var entityComponentType2Systems = new Dictionary<(Type, Type), List<IEcsSystem>>();
+            var allEntitySystems = new Dictionary<Type, Dictionary<Type, List<SystemInfo>>>();
+            var allEntityComponentSystems = new Dictionary<(Type, Type), Dictionary<string, SystemInfo>>();
+            var allUpdateSystems = new Dictionary<Type, List<SystemInfo>>();
+            var allFixedUpdateSystems = new Dictionary<Type, List<SystemInfo>>();
+            var updateEntityTypes = new List<Type>();
+
+            foreach (var systemType in types)
+            {
+                // Only consider non-abstract types that implement IEcsSystem
+                if (systemType == null)
+                {
+                    continue;
+                }
+                if (systemType.IsAbstract || systemType.IsInterface)
+                {
+                    continue;
+                }
+                if (!typeof(IEcsSystem).IsAssignableFrom(systemType))
+                {
+                    continue;
+                }
+                if (systemType.ContainsGenericParameters)
+                {
+                    continue;
+                }
+
+                // Create instance safely
+                IEcsSystem system;
+                try
+                {
+                    system = Activator.CreateInstance(systemType) as IEcsSystem;
+                }
+                catch
+                {
+                    // Skip types without parameterless constructors or failing activation
+                    continue;
+                }
+                if (system == null)
+                {
+                    continue;
+                }
+
+                allSystems.Add(systemType, system);
+
+                // 显式执行顺序与相位（未标注默认 0；相同 Order 保持注册顺序，稳定排序）
+                var systemOrder = 0;
+                var orderAttribute = systemType.GetCustomAttributes<SystemOrderAttribute>().FirstOrDefault();
+                if (orderAttribute != null)
+                {
+                    systemOrder = orderAttribute.Order;
+                }
+
+                var systemPhase = 0;
+                var phaseAttribute = systemType.GetCustomAttributes<SystemPhaseAttribute>().FirstOrDefault();
+                if (phaseAttribute != null)
+                {
+                    systemPhase = phaseAttribute.Phase;
+                }
+
+                if (system is IEcsEntitySystem ecsEntitySystem)
+                {
+                    var entityType = ecsEntitySystem.EntityType;
+
+                    if (!entityType2Systems.TryGetValue(entityType, out var ecsSystems))
+                    {
+                        ecsSystems = new List<IEcsSystem>();
+                        entityType2Systems.Add(entityType, ecsSystems);
+                    }
+                    ecsSystems.Add(system);
+
+                    if (!allEntitySystems.TryGetValue(entityType, out var typeSystems))
+                    {
+                        typeSystems = new Dictionary<Type, List<SystemInfo>>();
+                        allEntitySystems.Add(entityType, typeSystems);
+                    }
+
+                    // 解析 SystemRequireComponent 特性
+                    var requireComponentAttrs = systemType.GetCustomAttributes<SystemRequireComponentAttribute>();
+                    var requiredComponentTypes = requireComponentAttrs
+                        .SelectMany(attr => attr.ComponentTypes)
+                        .Distinct()
+                        .ToArray();
+
+                    var interfaces = systemType.GetInterfaces();
+                    foreach (var item in DriveTypes)
+                    {
+                        if (interfaces.Contains(item))
+                        {
+                            var arr = item.Name.ToCharArray();
+                            var methodName = string.Empty;
+                            for (int i = 1; i < arr.Length; i++)
+                            {
+                                methodName += arr[i];
+                            }
+                            var systemAction = systemType.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public);
+                            var systemInfo = new SystemInfo() { System = system, Action = systemAction, RequiredComponentTypes = requiredComponentTypes, Order = systemOrder, Phase = systemPhase };
+                            if (typeSystems.ContainsKey(item) == false)
+                            {
+                                typeSystems.Add(item, new List<SystemInfo>());
+                            }
+                            typeSystems[item].Add(systemInfo);
+
+                            if (item == typeof(IUpdate))
+                            {
+                                if (allUpdateSystems.ContainsKey(entityType) == false)
+                                {
+                                    allUpdateSystems.Add(entityType, new List<SystemInfo>());
+                                }
+                                allUpdateSystems[entityType].Add(systemInfo);
+
+                                if (updateEntityTypes.Contains(entityType) == false)
+                                {
+                                    updateEntityTypes.Add(entityType);
+                                }
+                            }
+
+                            if (item == typeof(IFixedUpdate))
+                            {
+                                if (allFixedUpdateSystems.ContainsKey(entityType) == false)
+                                {
+                                    allFixedUpdateSystems.Add(entityType, new List<SystemInfo>());
+                                }
+                                allFixedUpdateSystems[entityType].Add(systemInfo);
+
+                                if (updateEntityTypes.Contains(entityType) == false)
+                                {
+                                    updateEntityTypes.Add(entityType);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (system is IEcsComponentSystem ecsEntityComponentSystem)
+                {
+                    var entityType = ecsEntityComponentSystem.EntityType;
+                    var componentType = ecsEntityComponentSystem.ComponentType;
+                    var tuple = (entityType, componentType);
+
+                    if (!entityComponentType2Systems.TryGetValue(tuple, out var ecsSystems))
+                    {
+                        ecsSystems = new List<IEcsSystem>();
+                        entityComponentType2Systems.Add(tuple, ecsSystems);
+                    }
+                    ecsSystems.Add(system);
+
+                    allEntityComponentSystems.TryGetValue(tuple, out var pairs);
+                    if (pairs == null)
+                    {
+                        pairs = new Dictionary<string, SystemInfo>();
+                        allEntityComponentSystems.Add(tuple, pairs);
+                    }
+
+                    // 解析 SystemRequireComponent 特性
+                    var requireComponentAttrs = systemType.GetCustomAttributes<SystemRequireComponentAttribute>();
+                    var requiredComponentTypes = requireComponentAttrs
+                        .SelectMany(attr => attr.ComponentTypes)
+                        .Distinct()
+                        .ToArray();
+
+                    var interfaces = systemType.GetInterfaces();
+                    foreach (var item in DriveTypes)
+                    {
+                        if (interfaces.Contains(item))
+                        {
+                            var arr = item.Name.ToCharArray();
+                            var methodName = string.Empty;
+                            for (int i = 1; i < arr.Length; i++)
+                            {
+                                methodName += arr[i];
+                            }
+                            var systemAction = systemType.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public);
+                            if (systemAction == null)
+                            {
+                                //ConsoleLog.Error($"RegisterSystems systemAction == null {systemType.Name} {methodName} {entityType.Name} {componentType.Name}");
+                            }
+                            else
+                            {
+                                var systemInfo = new SystemInfo() { System = system, Action = systemAction, RequiredComponentTypes = requiredComponentTypes, Order = systemOrder, Phase = systemPhase };
+                                pairs.Add($"{item.Name}_{systemType.Name}", systemInfo);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 显式排序：同一实体类型的驱动列表按 SystemOrderAttribute 稳定排序，
+            // 避免依赖程序集 / 注册顺序（项目规范：System 执行顺序必须显式定义）。
+            SortByOrder(allUpdateSystems);
+            SortByOrder(allFixedUpdateSystems);
+            SortEntitySystemMaps(allEntitySystems);
+
+            AllSystems = allSystems;
+            EntityType2Systems = entityType2Systems;
+            EntityComponentType2Systems = entityComponentType2Systems;
+            AllEntitySystems = allEntitySystems;
+            AllEntityComponentSystems = allEntityComponentSystems;
+            AllUpdateSystems = allUpdateSystems;
+            AllFixedUpdateSystems = allFixedUpdateSystems;
+            UpdateEntityTypes = updateEntityTypes;
+        }
+
+        /// <summary>对每个实体类型的 SystemInfo 列表按 Order 稳定排序。</summary>
+        private static void SortByOrder(Dictionary<Type, List<SystemInfo>> systems)
+        {
+            foreach (var key in systems.Keys.ToList())
+            {
+                systems[key] = systems[key].OrderBy(s => s.Order).ToList();
+            }
+        }
+
+        /// <summary>对实体类型 → 驱动接口 → SystemInfo 列表 的映射逐层稳定排序。</summary>
+        private static void SortEntitySystemMaps(Dictionary<Type, Dictionary<Type, List<SystemInfo>>> maps)
+        {
+            foreach (var entityMap in maps.Values)
+            {
+                SortByOrder(entityMap);
+            }
+        }
+
+        public T GetSystemInstance<T>() where T : class, new()
+        {
+            var systemType = typeof(T);
+            AllSystems.TryGetValue(systemType, out var system);
+            return system as T;
+        }
+
+        /// <summary>
+        /// 检查实体是否满足 SystemInfo 中声明的组件依赖。
+        /// 如果没有任何依赖要求则始终通过。
+        /// </summary>
+        private static bool CheckComponentRequirements(EcsEntity entity, SystemInfo systemInfo)
+        {
+            var requiredTypes = systemInfo.RequiredComponentTypes;
+            if (requiredTypes == null || requiredTypes.Length == 0)
+            {
+                return true;
+            }
+            var components = entity.Components;
+            for (int i = 0; i < requiredTypes.Length; i++)
+            {
+                if (!components.ContainsKey(requiredTypes[i]))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        public void DriveEntitySystems(EcsEntity entity, Type entityType, Type driveType, object[] args = null)
+        {
+            AllEntitySystems.TryGetValue(entityType, out var systems);
+            if (systems == null)
+            {
+                return;
+            }
+            foreach (var item in systems)
+            {
+                if (driveType.Equals(item.Key))
+                {
+                    var systemList = item.Value;
+                    foreach (var systemInfo in systemList)
+                    {
+                        // 组件条件过滤：实体缺少必需组件则跳过
+                        if (!CheckComponentRequirements(entity, systemInfo))
+                        {
+                            continue;
+                        }
+
+                        var system = systemInfo.System;
+                        var method = systemInfo.Action;
+                        if (args == null)
+                        {
+                            method.Invoke(system, new object[] { entity });
+                        }
+                        else
+                        {
+                            method.Invoke(system, args);
+                        }
+                    }
+                }
+            }
+        }
+
+        public void DriveEntitySystems<T1>(T1 entity, Type driveType, object[] args = null) where T1 : EcsEntity
+        {
+            DriveEntitySystems(entity, typeof(EcsEntity), driveType, args);
+            // 当实际类型与 EcsEntity 相同时避免重复调用
+            if (typeof(EcsEntity) != entity.GetType())
+            {
+                DriveEntitySystems(entity, entity.GetType(), driveType, args);
+            }
+        }
+
+        public void DriveComponentSystems<T1, T2>(T1 entity, T2 component, Type entityType, Type driveType) where T1 : EcsEntity where T2 : EcsComponent
+        {
+            AllEntityComponentSystems.TryGetValue((entityType, component.GetType()), out var systems);
+            if (systems == null)
+            {
+                return;
+            }
+            foreach (var item in systems)
+            {
+                if (item.Key.StartsWith(driveType.Name))
+                {
+                    var systemInfo = item.Value;
+                    // 组件条件过滤：实体缺少必需组件则跳过
+                    if (!CheckComponentRequirements(entity, systemInfo))
+                    {
+                        continue;
+                    }
+
+                    var system = systemInfo.System;
+                    var method = systemInfo.Action;
+                    if (method == null)
+                    {
+                        //ConsoleLog.Error($"DriveComponentSystems method == null {entityType.Name} {driveType.Name}");
+                    }
+                    else
+                    {
+                        method.Invoke(system, new object[] { entity, component });
+                    }
+                }
+            }
+            //try
+            //{
+
+            //}
+            //catch (Exception)
+            //{
+            //    ConsoleLog.Error($"DriveComponentSystems {entityType.Name} {driveType.Name}");
+            //    throw;
+            //}
+        }
+
+        public void DriveComponentSystems<T1, T2>(T1 entity, T2 component, Type driveType) where T1 : EcsEntity where T2 : EcsComponent
+        {
+            DriveComponentSystems(entity, component, typeof(EcsEntity), driveType);
+            if (entity is EcsNode) DriveComponentSystems(entity, component, typeof(EcsNode), driveType);
+            // 当实际类型与 EcsEntity 相同时避免重复调用
+            if (typeof(EcsEntity) != entity.GetType())
+            {
+                DriveComponentSystems(entity, component, entity.GetType(), driveType);
+            }
+        }
+
+        public List<Type> UpdateEntityTypes { get; set; } = new List<Type>();
+        public Dictionary<Type, List<EcsEntity>> UpdateEntities { get; set; } = new Dictionary<Type, List<EcsEntity>>();
+        public Queue<EcsEntity> AddEntities { get; set; } = new Queue<EcsEntity>();
+        public Queue<EcsEntity> RemoveEntities { get; set; } = new Queue<EcsEntity>();
+
+        /// <summary>
+        /// 驱动全部更新系统（所有相位）。客户端使用；服务端请用 <see cref="DriveEntityUpdate(int)"/> 按相位驱动。
+        /// </summary>
+        public void DriveEntityUpdate()
+        {
+            DriveEntityUpdateCore(null);
+        }
+
+        /// <summary>
+        /// 只驱动 <see cref="SystemPhaseAttribute"/> 等于 <paramref name="phase"/> 的更新系统。
+        /// 用于服务端迁移期：一次 Step 在多个相位点分别驱动。
+        /// </summary>
+        public void DriveEntityUpdate(int phase)
+        {
+            DriveEntityUpdateCore(phase);
+        }
+
+        private void DriveEntityUpdateCore(int? phase)
+        {
+            while (AddEntities.Count > 0)
+            {
+                var entity = AddEntities.Dequeue();
+                var entityType = entity.GetType();
+                if (!UpdateEntities.TryGetValue(entityType, out var list))
+                {
+                    list = new List<EcsEntity>();
+                    UpdateEntities.Add(entityType, list);
+                }
+                list.Add(entity);
+            }
+
+            while (RemoveEntities.Count > 0)
+            {
+                var entity = RemoveEntities.Dequeue();
+                var entityType = entity.GetType();
+                if (UpdateEntities.TryGetValue(entityType, out var list))
+                {
+                    list.Remove(entity);
+                }
+            }
+
+            if (this.IsDisposed)
+            {
+                return;
+            }
+
+            var systems = AllUpdateSystems;
+            foreach (var item in systems)
+            {
+                if (this.IsDisposed)
+                {
+                    continue;
+                }
+                var entityType = item.Key;
+                if (entityType == typeof(EcsNode) || entityType.BaseType == typeof(EcsNode))
+                {
+                    var systemList = item.Value;
+                    foreach (var systemInfo in systemList)
+                    {
+                        if (this.IsDisposed)
+                        {
+                            continue;
+                        }
+                        if (phase.HasValue && systemInfo.Phase != phase.Value)
+                        {
+                            continue;
+                        }
+                        var system = systemInfo.System;
+                        var method = systemInfo.Action;
+
+                        if (entityType == typeof(EcsNode))
+                        {
+                            method.Invoke(system, new object[] { this });
+                        }
+                        else
+                        {
+                            if (entityType == this.GetType())// entityType != typeof(EcsNode) && 
+                            {
+                                method.Invoke(system, new object[] { this });
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if (UpdateEntities.TryGetValue(entityType, out var entities))
+                {
+                    var systemList = item.Value;
+                    foreach (var systemInfo in systemList)
+                    {
+                        if (phase.HasValue && systemInfo.Phase != phase.Value)
+                        {
+                            continue;
+                        }
+                        var system = systemInfo.System;
+                        var method = systemInfo.Action;
+                        foreach (var entity in entities)
+                        {
+                            if (entity.IsDisposed) continue;
+                            if (!CheckComponentRequirements(entity, systemInfo))
+                            {
+                                continue;
+                            }
+                            method.Invoke(system, new object[] { entity });
+                        }
+                    }
+                }
+            }
+        }
+
+        public void DriveEntityFixedUpdate()
+        {
+            var systems = AllFixedUpdateSystems;
+            foreach (var item in systems)
+            {
+                if (this.IsDisposed)
+                {
+                    continue;
+                }
+                var entityType = item.Key;
+                if (entityType == typeof(EcsNode) || entityType.BaseType == typeof(EcsNode))
+                {
+                    var systemList = item.Value;
+                    foreach (var systemInfo in systemList)
+                    {
+                        if (this.IsDisposed)
+                        {
+                            continue;
+                        }
+                        var system = systemInfo.System;
+                        var method = systemInfo.Action;
+                        
+                        if (entityType == typeof(EcsNode))
+                        {
+                            method.Invoke(system, new object[] { this });
+                        }
+                        else
+                        {
+                            if (entityType == this.GetType())// entityType != typeof(EcsNode) && 
+                            {
+                                method.Invoke(system, new object[] { this });
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if (UpdateEntities.TryGetValue(entityType, out var entities))
+                {
+                    var systemList = item.Value;
+                    foreach (var systemInfo in systemList)
+                    {
+                        var system = systemInfo.System;
+                        var method = systemInfo.Action;
+                        foreach (var entity in entities)
+                        {
+                            if (entity.IsDisposed) continue;
+                            if (!CheckComponentRequirements(entity, systemInfo))
+                            {
+                                continue;
+                            }
+                            method.Invoke(system, new object[] { entity });
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

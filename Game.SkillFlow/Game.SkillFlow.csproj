@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>Game.SkillFlow</AssemblyName>
+    <RootNamespace>NetGame.SkillFlow</RootNamespace>
+    <NoWarn>$(NoWarn);CS8600;CS8601;CS8602;CS8603;CS8618;CS8625;CS8765</NoWarn>
+  </PropertyGroup>
+</Project>
