@@ -103,3 +103,4 @@ public static class SkillExample
 ## 文档
 
 - [API 参考](./API-REFERENCE.md)：核心类型、扩展接口和运行时行为说明。
+- [JavaScript 版本](./Game.SkillFlow.JavaScript/README.md)：Node.js 与浏览器可用的 ES module 实现及运行说明。

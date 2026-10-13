@@ -43,3 +43,7 @@
 
 可运行示例见 [`samples/Game.SkillFlow.QuickStart`](../../samples/Game.SkillFlow.QuickStart/)；
 构建命令见 [`README.md`](./README.md)。
+
+## JavaScript 版本
+
+仓库同时提供 [Game.SkillFlow JavaScript](./Game.SkillFlow.JavaScript/README.md)，包含技能流程解释器、效果注册和触发器扩展契约。JavaScript 版本要求支持 BigInt 的现代浏览器或 Node.js 20+，API 与运行时差异见 [JavaScript API 参考](./Game.SkillFlow.JavaScript/API-REFERENCE.md)。

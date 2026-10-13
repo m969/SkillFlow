@@ -1,0 +1,13 @@
+{
+  "name": "@m969/game-skillflow",
+  "version": "1.0.0",
+  "description": "Data-driven game skill flow and combat effect runtime",
+  "type": "module",
+  "exports": "./src/index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
