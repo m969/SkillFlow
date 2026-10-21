@@ -1,5 +1,3 @@
-using TrueSync;
-
 namespace NetGame.Combat
 {
     /// <summary>
@@ -46,8 +44,8 @@ namespace NetGame.Combat
     /// <summary>需要逐帧推进的 Trigger 运行时额外实现此接口。</summary>
     public interface ITriggerUpdateRuntime : ITriggerRuntime
     {
-        /// <summary>按定点步长推进（1 / tickrate 秒），禁止使用浮点时间。</summary>
-        void Update(FP delta);
+        /// <summary>按秒为单位的浮点时间增量推进。</summary>
+        void Update(float delta);
     }
 
     /// <summary>

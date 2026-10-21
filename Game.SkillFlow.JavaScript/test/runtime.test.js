@@ -24,7 +24,7 @@ function execution(root, { context = new SkillFlowContext(), host } = {}) {
   });
 }
 
-test("Sequence 用 32.32 定点计时并在延迟后执行动作", () => {
+test("Sequence 按浮点时间累计并在延迟后执行动作", () => {
   const actions = [];
   const run = execution(
     SkillFlowNodes.Sequence(

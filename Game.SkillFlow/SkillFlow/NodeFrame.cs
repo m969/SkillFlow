@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using TrueSync;
 
 namespace NetGame.SkillFlow
 {
@@ -25,8 +24,8 @@ namespace NetGame.SkillFlow
         /// <summary>AbilityEffect 配置效果推进游标。</summary>
         public int EffectIndex;
 
-        /// <summary>计时器（Delay / Timeout，定点）。</summary>
-        public FP Timer;
+        /// <summary>计时器（Delay / Timeout，单位为秒）。</summary>
+        public float Timer;
 
         /// <summary>重试计数（Retry）。</summary>
         public int RetryCount;

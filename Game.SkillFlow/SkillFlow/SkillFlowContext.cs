@@ -8,7 +8,7 @@ namespace NetGame.SkillFlow
 {
     /// <summary>
     /// 技能编排运行时上下文：每次施法独立实例，节点经黑板（Variables）传递数据，杜绝多角色同技能状态污染。
-    /// 双端共用（服务端 / 客户端均基于 EcsNode + TrueSync）；时间用定点 <c>CastStartTick</c>，不存墙钟。
+    /// 双端共用（服务端 / 客户端均基于 EcsNode + TrueSync）；施法起始时间由调用方提供，不读取墙钟。
     /// </summary>
     public class SkillFlowContext
     {
@@ -33,8 +33,8 @@ namespace NetGame.SkillFlow
         /// <summary>施法朝向。</summary>
         public TSVector InputDirection;
 
-        /// <summary>施法起始 tick（定点，确定性时间基准）。</summary>
-        public FP CastStartTick;
+        /// <summary>施法起始时间（秒），由调用方提供。</summary>
+        public float CastStartTick;
 
         /// <summary>黑板：节点间传递接入方定义的数据。</summary>
         public Dictionary<string, object> Variables = new Dictionary<string, object>();

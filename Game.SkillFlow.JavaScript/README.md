@@ -1,13 +1,13 @@
 # Game.SkillFlow JavaScript
 
-Game.SkillFlow JavaScript 是与 C# 库配套的 ES module 实现，可在 Node.js 和支持 BigInt 的现代浏览器中运行。它包含完整的技能流程节点解释器、效果处理器注册表、技能配置注册表和触发器扩展契约；不依赖 npm 第三方包，也不绑定具体游戏或 ECS。
+Game.SkillFlow JavaScript 是与 C# 库配套的 ES module 实现，可在 Node.js 和现代浏览器中运行。它包含完整的技能流程节点解释器、效果处理器注册表、技能配置注册表和触发器扩展契约；不依赖 npm 第三方包，也不绑定具体游戏或 ECS。
 
 ## 环境要求
 
 - Node.js 20 或更高版本
-- 浏览器需支持 ES modules 和 BigInt（ES2020）
+- 浏览器需支持 ES modules
 
-运行时不读取系统时钟。`Tick` 接收调用方提供的秒数，并使用有符号 32.32 定点数累计技能节点时间。流程配置中的时长按 C# `float` 精度存储，以便和 C# 配置保持一致。
+运行时不读取系统时钟。`Tick` 接收调用方提供的秒数，并按 C# `float` 精度累计技能节点时间。流程配置中的时长也按 C# `float` 精度存储，以便和 C# 配置保持一致。
 
 ## 快速开始
 
@@ -49,7 +49,7 @@ const execution = new SkillExecuteComponent({
 
 let result = SkillFlowInterpreter.Enter(execution);
 if (result.Status === NodeStatus.Running) {
-  // 在游戏自己的确定性更新循环中持续传入秒数增量。
+  // 在游戏更新循环中持续传入秒数增量。
   result = SkillFlowInterpreter.Tick(execution, 1 / 60);
 }
 if (result.Status !== NodeStatus.Running) {

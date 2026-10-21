@@ -8,7 +8,7 @@ Game.SkillFlow 是一个面向游戏技能与战斗流程的轻量级 C# 库。�
 - **组合与流程控制**：提供 Sequence、Selector、Parallel、Race、If、Switch、Loop、ForEach、Retry、Delay、WaitEvent、Timeout 和 CancelScope 节点。
 - **接入方自定义行为**：通过 `ISkillActionHost` 执行原子动作；通过 `IAbilityEffectHost` 分派战斗效果。
 - **每次执行独立状态**：`SkillExecuteComponent` 和 `SkillFlowContext` 保存单次执行的运行状态与黑板数据。
-- **确定性时间输入**：解释器不读取系统时钟；调用方以 `TrueSync.FP` 增量驱动流程。
+- **外部时间驱动**：解释器不读取系统时钟；调用方按秒传入 `float` 时间增量。
 - **效果与触发器扩展契约**：提供基于稳定字符串 ID 的配置和处理器注册接口，不绑定具体战斗规则。
 
 ## 环境要求
@@ -27,11 +27,10 @@ dotnet build Game.SkillFlow.csproj
 
 ## 快速开始
 
-下面的示例创建一个“等待一小段时间，然后执行动作”的流程。实际游戏中，应在确定性更新循环中持续调用 `Tick`，而不是在一次调用中循环推进。
+下面的示例创建一个“等待一小段时间，然后执行动作”的流程。实际游戏中，应在游戏更新循环中持续调用 `Tick`，而不是在一次调用中循环推进。
 
 ```csharp
 using NetGame.SkillFlow;
-using TrueSync;
 
 public sealed class GameActionHost : ISkillActionHost
 {
@@ -73,7 +72,7 @@ public static class SkillExample
         return SkillFlowInterpreter.Enter(execution);
     }
 
-    public static NodeResult Update(SkillExecuteComponent execution, FP delta)
+    public static NodeResult Update(SkillExecuteComponent execution, float delta)
     {
         return SkillFlowInterpreter.Tick(execution, delta);
     }
@@ -89,7 +88,7 @@ public static class SkillExample
 
 1. 创建技能配置、上下文和执行宿主，并组装 `SkillExecuteComponent`。
 2. 调用 `SkillFlowInterpreter.Enter` 启动流程。
-3. 若结果为 `NodeStatus.Running`，在后续游戏更新中传入定点时间增量调用 `Tick`。
+3. 若结果为 `NodeStatus.Running`，在后续游戏更新中传入以秒为单位的 `float` 时间增量调用 `Tick`。
 4. 流程结束或被取消后调用 `Exit`，清理尚未释放的事件订阅。需要主动取消时调用 `Cancel`。
 
 `SkillFlowContext.Variables` 是执行级黑板，可用于在节点之间传递接入方定义的数据。接入战斗实体、事件源或效果宿主时，也应通过上下文注入对应对象；相关对象的生命周期由接入方管理。

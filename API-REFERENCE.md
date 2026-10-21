@@ -13,7 +13,7 @@
 - `ISkillActionHost` 将稳定的 action key 映射到应用层行为。
 - `ISkillEventSource` 提供 WaitEvent 使用的事件订阅。
 - `SkillFlowInterpreter.Enter` 用于启动节点图。当其返回 `Running` 时，使用
-  确定性的 `TrueSync.FP` 时间增量调用 `Tick`。执行结束或被取消时调用 `Exit`，
+  以秒为单位的 `float` 时间增量调用 `Tick`。执行结束或被取消时调用 `Exit`，
   以释放尚未结束的订阅。
 
 ## `NetGame.Combat`
@@ -46,4 +46,4 @@
 
 ## JavaScript 版本
 
-仓库同时提供 [Game.SkillFlow JavaScript](./Game.SkillFlow.JavaScript/README.md)，包含技能流程解释器、效果注册和触发器扩展契约。JavaScript 版本要求支持 BigInt 的现代浏览器或 Node.js 20+，API 与运行时差异见 [JavaScript API 参考](./Game.SkillFlow.JavaScript/API-REFERENCE.md)。
+仓库同时提供 [Game.SkillFlow JavaScript](./Game.SkillFlow.JavaScript/README.md)，包含技能流程解释器、效果注册和触发器扩展契约。JavaScript 版本支持现代浏览器或 Node.js 20+，API 与运行时差异见 [JavaScript API 参考](./Game.SkillFlow.JavaScript/API-REFERENCE.md)。

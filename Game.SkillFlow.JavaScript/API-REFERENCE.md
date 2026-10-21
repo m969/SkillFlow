@@ -13,7 +13,7 @@
 - `SkillFlowInterpreter.Enter` 启动流程；结果为 `NodeStatus.Running` 时，在后续更新中
   用 `Tick(execution, deltaSeconds)` 推进。完成或取消后调用 `Exit` 清理订阅；
   可主动调用 `Cancel`。时间步长由调用方提供，不使用系统时钟。
-- 内部计时器以 32.32 定点数累计；调用 `Tick` 时传入以秒为单位的有限数字。
+- 内部计时器以 `float` 精度累计；调用 `Tick` 时传入以秒为单位的有限数字。
 - `SkillFlowContext.Variables` 是 `Map`，`SkillFlowContextSystem` 提供
   `SetVariable` / `GetVariable` 读写帮助方法；读取不存在的键时可返回默认值。
 - `ActionHost` 实现 `Execute(context, actionKey, frame)`；`EffectHost` 实现

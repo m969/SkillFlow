@@ -337,7 +337,6 @@ export class NodeFrame {
     this.EventSubscription = null;
     this.Locals = new Map();
     this.ChildFrames = config.Children.map((child) => new NodeFrame(child));
-    this._timerRaw = 0n;
   }
 }
 
@@ -353,36 +352,6 @@ export class SkillExecuteComponent {
     this.IsStarted = false;
     this.IsFinished = false;
   }
-}
-
-const FIXED_ONE = 1n << 32n;
-const FLOAT64_BUFFER = new ArrayBuffer(8);
-const FLOAT64_VIEW = new DataView(FLOAT64_BUFFER);
-
-function toFixedRaw(value, asFloat32 = false) {
-  const number = asFloat32 ? Math.fround(value) : value;
-  if (!Number.isFinite(number)) {
-    throw new RangeError("time delta must be finite");
-  }
-  FLOAT64_VIEW.setFloat64(0, number, false);
-  const bits = FLOAT64_VIEW.getBigUint64(0, false);
-  const exponent = Number((bits >> 52n) & 0x7ffn);
-  const fraction = bits & ((1n << 52n) - 1n);
-  if (exponent === 0 && fraction === 0n) {
-    return 0n;
-  }
-
-  const significand = exponent === 0 ? fraction : (1n << 52n) | fraction;
-  const shift = (exponent === 0 ? -1022 : exponent - 1023) - 52 + 32;
-  let raw = shift >= 0 ? significand << BigInt(shift) : significand >> BigInt(-shift);
-  if ((bits >> 63n) !== 0n) {
-    raw = -raw;
-  }
-  return BigInt.asIntN(64, raw);
-}
-
-function addFixedRaw(left, right) {
-  return BigInt.asIntN(64, left + right);
 }
 
 function dispose(subscription) {
@@ -483,7 +452,7 @@ function abilityEffect(frame, config, context) {
   return NodeResult.Success();
 }
 
-function step(frame, config, context, host, deltaRaw) {
+function step(frame, config, context, host, delta) {
   if (!frame.Entered) {
     frame.Entered = true;
     broadcastNodeEnter(context, frame);
@@ -492,36 +461,35 @@ function step(frame, config, context, host, deltaRaw) {
   let result;
   switch (frame.Type) {
     case SkillFlowNodeType.Sequence:
-      result = sequence(frame, config, context, host, deltaRaw);
+      result = sequence(frame, config, context, host, delta);
       break;
     case SkillFlowNodeType.Selector:
-      result = selector(frame, config, context, host, deltaRaw);
+      result = selector(frame, config, context, host, delta);
       break;
     case SkillFlowNodeType.Parallel:
-      result = parallel(frame, config, context, host, deltaRaw);
+      result = parallel(frame, config, context, host, delta);
       break;
     case SkillFlowNodeType.Race:
-      result = race(frame, config, context, host, deltaRaw);
+      result = race(frame, config, context, host, delta);
       break;
     case SkillFlowNodeType.If:
-      result = branchIf(frame, config, context, host, deltaRaw);
+      result = branchIf(frame, config, context, host, delta);
       break;
     case SkillFlowNodeType.Switch:
-      result = branchSwitch(frame, config, context, host, deltaRaw);
+      result = branchSwitch(frame, config, context, host, delta);
       break;
     case SkillFlowNodeType.Loop:
-      result = loop(frame, config, context, host, deltaRaw);
+      result = loop(frame, config, context, host, delta);
       break;
     case SkillFlowNodeType.ForEach:
-      result = forEach(frame, config, context, host, deltaRaw);
+      result = forEach(frame, config, context, host, delta);
       break;
     case SkillFlowNodeType.Retry:
-      result = retry(frame, config, context, host, deltaRaw);
+      result = retry(frame, config, context, host, delta);
       break;
     case SkillFlowNodeType.Delay:
-      frame._timerRaw = addFixedRaw(frame._timerRaw, deltaRaw);
-      frame.Timer = Number(frame._timerRaw) / Number(FIXED_ONE);
-      result = frame._timerRaw >= toFixedRaw(config.FloatParam, true)
+      frame.Timer = Math.fround(frame.Timer + delta);
+      result = frame.Timer >= config.FloatParam
         ? NodeResult.Success()
         : NodeResult.Running();
       break;
@@ -529,12 +497,12 @@ function step(frame, config, context, host, deltaRaw) {
       result = waitEvent(frame, config, context);
       break;
     case SkillFlowNodeType.Timeout:
-      result = timeout(frame, config, context, host, deltaRaw);
+      result = timeout(frame, config, context, host, delta);
       break;
     case SkillFlowNodeType.CancelScope:
       result = config.Children.length === 0
         ? NodeResult.Failure("cancelscope body missing")
-        : step(frame.ChildFrames[0], config.Children[0], context, host, deltaRaw);
+        : step(frame.ChildFrames[0], config.Children[0], context, host, delta);
       break;
     case SkillFlowNodeType.SkillAction:
       result = host.Execute(context, config.StringParam, frame);
@@ -553,14 +521,14 @@ function step(frame, config, context, host, deltaRaw) {
   return result;
 }
 
-function sequence(frame, config, context, host, deltaRaw) {
+function sequence(frame, config, context, host, delta) {
   while (frame.ChildIndex < config.Children.length) {
     const result = step(
       frame.ChildFrames[frame.ChildIndex],
       config.Children[frame.ChildIndex],
       context,
       host,
-      deltaRaw
+      delta
     );
     if (result.Status === NodeStatus.Running) {
       return NodeResult.Running();
@@ -573,14 +541,14 @@ function sequence(frame, config, context, host, deltaRaw) {
   return NodeResult.Success();
 }
 
-function selector(frame, config, context, host, deltaRaw) {
+function selector(frame, config, context, host, delta) {
   while (frame.ChildIndex < config.Children.length) {
     const result = step(
       frame.ChildFrames[frame.ChildIndex],
       config.Children[frame.ChildIndex],
       context,
       host,
-      deltaRaw
+      delta
     );
     if (result.Status === NodeStatus.Running) {
       return NodeResult.Running();
@@ -601,7 +569,7 @@ function cancelAllRunning(frame) {
   }
 }
 
-function parallel(frame, config, context, host, deltaRaw) {
+function parallel(frame, config, context, host, delta) {
   const any = config.BoolParam;
   let anySuccess = false;
   let allTerminated = true;
@@ -609,7 +577,7 @@ function parallel(frame, config, context, host, deltaRaw) {
   for (let i = 0; i < config.Children.length; i++) {
     const child = frame.ChildFrames[i];
     if (child.Status === NodeStatus.Running) {
-      step(child, config.Children[i], context, host, deltaRaw);
+      step(child, config.Children[i], context, host, delta);
     }
     if (child.Status === NodeStatus.Running) {
       allTerminated = false;
@@ -637,12 +605,12 @@ function parallel(frame, config, context, host, deltaRaw) {
   return allTerminated ? NodeResult.Success() : NodeResult.Running();
 }
 
-function race(frame, config, context, host, deltaRaw) {
+function race(frame, config, context, host, delta) {
   const raceOnFailure = config.BoolParam;
   for (let i = 0; i < config.Children.length; i++) {
     const child = frame.ChildFrames[i];
     if (child.Status === NodeStatus.Running) {
-      step(child, config.Children[i], context, host, deltaRaw);
+      step(child, config.Children[i], context, host, delta);
     }
     const wins = raceOnFailure
       ? child.Status === NodeStatus.Failure
@@ -657,7 +625,7 @@ function race(frame, config, context, host, deltaRaw) {
     : NodeResult.Failure("race no winner");
 }
 
-function branchIf(frame, config, context, host, deltaRaw) {
+function branchIf(frame, config, context, host, delta) {
   if (!frame.Subscribed) {
     frame.Subscribed = true;
     frame.ChildIndex = getBoolean(context, config.StringParam) ? 0 : 1;
@@ -673,11 +641,11 @@ function branchIf(frame, config, context, host, deltaRaw) {
     config.Children[frame.ChildIndex],
     context,
     host,
-    deltaRaw
+    delta
   );
 }
 
-function branchSwitch(frame, config, context, host, deltaRaw) {
+function branchSwitch(frame, config, context, host, delta) {
   if (!frame.Subscribed) {
     frame.Subscribed = true;
     const selector = getInteger(context, config.StringParam);
@@ -695,7 +663,7 @@ function branchSwitch(frame, config, context, host, deltaRaw) {
     config.Children[frame.ChildIndex],
     context,
     host,
-    deltaRaw
+    delta
   );
 }
 
@@ -705,7 +673,7 @@ function resetFrame(frame) {
   frame.ChildIndex = 0;
   frame.EffectIndex = 0;
   frame.Timer = 0;
-  frame._timerRaw = 0n;
+  frame.Timer = 0;
   frame.RetryCount = 0;
   frame.Subscribed = false;
   frame.EventReceived = false;
@@ -715,7 +683,7 @@ function resetFrame(frame) {
   }
 }
 
-function loop(frame, config, context, host, deltaRaw) {
+function loop(frame, config, context, host, delta) {
   if (config.Children.length === 0) {
     return NodeResult.Failure("loop body missing");
   }
@@ -726,7 +694,7 @@ function loop(frame, config, context, host, deltaRaw) {
       frame.Locals.set("_index", frame.ChildIndex);
       resetFrame(body);
     }
-    const result = step(body, bodyConfig, context, host, deltaRaw);
+    const result = step(body, bodyConfig, context, host, delta);
     if (result.Status === NodeStatus.Running) {
       return NodeResult.Running();
     }
@@ -738,7 +706,7 @@ function loop(frame, config, context, host, deltaRaw) {
   return NodeResult.Success();
 }
 
-function forEach(frame, config, context, host, deltaRaw) {
+function forEach(frame, config, context, host, delta) {
   if (!frame.Subscribed) {
     frame.Subscribed = true;
     frame.Locals.set("_items", SkillFlowContextSystem.GetVariable(context, config.StringParam));
@@ -758,7 +726,7 @@ function forEach(frame, config, context, host, deltaRaw) {
       frame.Locals.set("_item", items[frame.ChildIndex]);
       resetFrame(body);
     }
-    const result = step(body, bodyConfig, context, host, deltaRaw);
+    const result = step(body, bodyConfig, context, host, delta);
     if (result.Status === NodeStatus.Running) {
       return NodeResult.Running();
     }
@@ -770,7 +738,7 @@ function forEach(frame, config, context, host, deltaRaw) {
   return NodeResult.Success();
 }
 
-function retry(frame, config, context, host, deltaRaw) {
+function retry(frame, config, context, host, delta) {
   if (config.Children.length === 0) {
     return NodeResult.Failure("retry body missing");
   }
@@ -781,7 +749,7 @@ function retry(frame, config, context, host, deltaRaw) {
       frame.Locals.set("_attempt", frame.RetryCount);
       resetFrame(body);
     }
-    const result = step(body, bodyConfig, context, host, deltaRaw);
+    const result = step(body, bodyConfig, context, host, delta);
     if (result.Status === NodeStatus.Running || result.Status === NodeStatus.Success) {
       return result.Status === NodeStatus.Running ? NodeResult.Running() : NodeResult.Success();
     }
@@ -809,7 +777,7 @@ function waitEvent(frame, config, context) {
   return NodeResult.Running();
 }
 
-function timeout(frame, config, context, host, deltaRaw) {
+function timeout(frame, config, context, host, delta) {
   if (config.Children.length === 0) {
     return NodeResult.Failure("timeout body missing");
   }
@@ -818,14 +786,13 @@ function timeout(frame, config, context, host, deltaRaw) {
     config.Children[0],
     context,
     host,
-    deltaRaw
+    delta
   );
   if (bodyResult.Status !== NodeStatus.Running) {
     return bodyResult;
   }
-  frame._timerRaw = addFixedRaw(frame._timerRaw, deltaRaw);
-  frame.Timer = Number(frame._timerRaw) / Number(FIXED_ONE);
-  if (frame._timerRaw >= toFixedRaw(config.FloatParam, true)) {
+  frame.Timer = Math.fround(frame.Timer + delta);
+  if (frame.Timer >= config.FloatParam) {
     cancelFrame(frame.ChildFrames[0]);
     return NodeResult.Timeout("timeout");
   }
@@ -839,7 +806,7 @@ function hasRunningDetached(frame) {
   return frame.ChildFrames.some(hasRunningDetached);
 }
 
-function driveDetached(frame, config, execution, deltaRaw) {
+function driveDetached(frame, config, execution, delta) {
   if (frame.Type === SkillFlowNodeType.CancelScope) {
     for (let i = 0; i < frame.ChildFrames.length; i++) {
       if (frame.ChildFrames[i].Status === NodeStatus.Running) {
@@ -848,7 +815,7 @@ function driveDetached(frame, config, execution, deltaRaw) {
           config.Children[i],
           execution.Context,
           execution.ActionHost,
-          deltaRaw
+          delta
         );
       }
     }
@@ -856,7 +823,7 @@ function driveDetached(frame, config, execution, deltaRaw) {
   }
   for (let i = 0; i < frame.ChildFrames.length; i++) {
     if (hasRunningDetached(frame.ChildFrames[i])) {
-      driveDetached(frame.ChildFrames[i], config.Children[i], execution, deltaRaw);
+      driveDetached(frame.ChildFrames[i], config.Children[i], execution, delta);
     }
   }
 }
@@ -880,7 +847,7 @@ function cancelFrame(frame) {
 
 /**
  * 无全局可变运行状态的解释器；所有状态存于 SkillExecuteComponent/NodeFrame。
- * 时间参数以秒传入，并在内部通过 32.32 定点数累计，不读取系统时钟。
+ * 时间参数以秒传入，并按 float 精度累计，不读取系统时钟。
  */
 export class SkillFlowInterpreter {
   static Enter(execution) {
@@ -893,19 +860,22 @@ export class SkillFlowInterpreter {
       execution.Config.Root,
       execution.Context,
       execution.ActionHost,
-      0n
+      0
     );
   }
 
   static Tick(execution, deltaSeconds) {
-    const deltaRaw = toFixedRaw(deltaSeconds);
+    if (typeof deltaSeconds !== "number" || !Number.isFinite(Math.fround(deltaSeconds))) {
+      throw new RangeError("time delta must be finite");
+    }
+    const delta = Math.fround(deltaSeconds);
     if (execution.RootFrame.Status === NodeStatus.Running) {
       const result = step(
         execution.RootFrame,
         execution.Config.Root,
         execution.Context,
         execution.ActionHost,
-        deltaRaw
+        delta
       );
       if (result.Status !== NodeStatus.Running) {
         execution.IsFinished = true;
@@ -914,7 +884,7 @@ export class SkillFlowInterpreter {
     }
 
     if (hasRunningDetached(execution.RootFrame)) {
-      driveDetached(execution.RootFrame, execution.Config.Root, execution, deltaRaw);
+      driveDetached(execution.RootFrame, execution.Config.Root, execution, delta);
     }
     if (!hasRunningDetached(execution.RootFrame)) {
       execution.IsFinished = true;

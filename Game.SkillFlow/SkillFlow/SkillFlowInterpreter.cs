@@ -1,6 +1,5 @@
 using ECS;
 using NetGame.Combat;
-using TrueSync;
 
 namespace NetGame.SkillFlow
 {
@@ -8,7 +7,7 @@ namespace NetGame.SkillFlow
     /// 技能编排解释器：无状态方法集合，读「数据图 Config + 运行时状态 NodeFrame」，
     /// 按 NodeType 分派控制语义并推进，写回 NodeFrame。
     /// 关键：状态全部在 Component，本类型无任何字段/属性（符合「System 只含方法」规范）；
-    /// 时间由分端注入 delta（服务端定点 tick / 客户端帧），不自行取墙钟（保确定性）。
+    /// 时间由调用方按秒注入浮点 delta，不自行读取系统时钟。
     /// </summary>
     public static class SkillFlowInterpreter
     {
@@ -22,11 +21,11 @@ namespace NetGame.SkillFlow
                 ec.RootFrame = BuildFrame(ec.Config.Root);
             }
             ec.IsStarted = true;
-            return Step(ec.RootFrame, ec.Config.Root, ec.Context, ec.ActionHost, FP.Zero);
+            return Step(ec.RootFrame, ec.Config.Root, ec.Context, ec.ActionHost, 0f);
         }
 
         /// <summary>每 tick / 每帧推进：根仍 Running 时递归推进；根已终态（如被取消）时驱动脱手子树（CancelScope 边界内仍运行的分支）。</summary>
-        public static NodeResult Tick(SkillExecuteComponent ec, FP delta)
+        public static NodeResult Tick(SkillExecuteComponent ec, float delta)
         {
             if (ec.RootFrame.Status == NodeStatus.Running)
             {
@@ -83,7 +82,7 @@ namespace NetGame.SkillFlow
 
         // -------------------- 统一推进：一个节点的一步 = 分派控制语义 --------------------
 
-        private static NodeResult Step(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult Step(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             // 节点首次进入：广播 Enter 事件（供表现层订阅；无执行载体则跳过）
             if (!frame.Entered)
@@ -200,7 +199,7 @@ namespace NetGame.SkillFlow
         // -------------------- 控制语义：Sequence（示范"数据驱动、无多态"风格） --------------------
 
         /// <summary>顺序：子节点按序执行，任一失败则停止；全部 Success 则 Success。</summary>
-        private static NodeResult Sequence(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult Sequence(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             while (frame.ChildIndex < cfg.Children.Count)
             {
@@ -229,7 +228,7 @@ namespace NetGame.SkillFlow
         // -------------------- 其余控制语义（骨架签名 + 最小占位，待实现遵循同一"分派"风格） --------------------
 
         /// <summary>选择：子节点按序尝试，直到一个成功即短路返回 Success；全部失败则 Failure。</summary>
-        private static NodeResult Selector(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult Selector(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             while (frame.ChildIndex < cfg.Children.Count)
             {
@@ -252,7 +251,7 @@ namespace NetGame.SkillFlow
         }
 
         /// <summary>并行：多子节点并发推进（每 tick 推进所有未完成分支）。完成策略由 cfg.BoolParam 决定：false=All（全部成功才结束），true=Any（任一成功即结束并取消其余）。</summary>
-        private static NodeResult Parallel(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult Parallel(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             bool any = cfg.BoolParam;
             int count = cfg.Children.Count;
@@ -307,7 +306,7 @@ namespace NetGame.SkillFlow
         }
 
         /// <summary>竞速：多分支竞争，最先达成目标结果者获胜并取消其余。由 cfg.BoolParam 决定：false=成功优先（RaceSuccess），true=失败优先（RaceFailure）。</summary>
-        private static NodeResult Race(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult Race(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             bool raceOnFailure = cfg.BoolParam;
             int count = cfg.Children.Count;
@@ -343,7 +342,7 @@ namespace NetGame.SkillFlow
 
         /// <summary>条件分支：读黑板布尔（cfg.StringParam 为键），true 走 then（Children[0]），false 走 else（Children[1]，可无）。
         /// 首次评估时锁定分支（frame.Subscribed），避免异步分支执行中途因条件变化而跳支。</summary>
-        private static NodeResult If(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult If(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             // 首次：根据黑板条件锁定分支（0=then，1=else）
             if (!frame.Subscribed)
@@ -368,7 +367,7 @@ namespace NetGame.SkillFlow
         }
 
         /// <summary>多路分支：读黑板整数值（cfg.StringParam 为键），匹配子节点 IntParam 相等的分支；无匹配时走最后一个 child（default 分支）。</summary>
-        private static NodeResult Switch(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult Switch(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             // 首次：根据黑板选择器匹配分支
             if (!frame.Subscribed)
@@ -401,7 +400,7 @@ namespace NetGame.SkillFlow
         }
 
         /// <summary>循环：重复执行子节点[0] 共 cfg.IntParam 次；循环体复用（ResetFrame），写入 _index 到局部。</summary>
-        private static NodeResult Loop(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult Loop(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             if (cfg.Children.Count < 1)
             {
@@ -436,7 +435,7 @@ namespace NetGame.SkillFlow
         }
 
         /// <summary>遍历：从黑板读取集合（cfg.StringParam 为键），对每个元素执行子节点[0]；当前 item 写入局部黑板 `_item`。</summary>
-        private static NodeResult ForEach(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult ForEach(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             // 首次初始化：读取源集合并缓存到局部（避免每 tick 重复读黑板）
             if (!frame.Subscribed)
@@ -490,7 +489,7 @@ namespace NetGame.SkillFlow
             f.Status = NodeStatus.Running;
             f.ChildIndex = 0;
             f.EffectIndex = 0;
-            f.Timer = FP.Zero;
+            f.Timer = 0f;
             f.RetryCount = 0;
             f.Subscribed = false;
             f.EventReceived = false;
@@ -502,7 +501,7 @@ namespace NetGame.SkillFlow
         }
 
         /// <summary>重试：子节点失败后重试（最多 cfg.IntParam 次），成功即结束；超限透传失败。循环体重置，写入 _attempt 到局部。</summary>
-        private static NodeResult Retry(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult Retry(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             if (cfg.Children.Count < 1)
             {
@@ -540,11 +539,11 @@ namespace NetGame.SkillFlow
             }
         }
 
-        /// <summary>延迟：累计定点时间，到点返回 Success；被取消时返回 Cancelled。</summary>
-        private static NodeResult Delay(NodeFrame f, SkillFlowNodeConfig c, FP d)
+        /// <summary>延迟：累计秒数，到点返回 Success；被取消时返回 Cancelled。</summary>
+        private static NodeResult Delay(NodeFrame f, SkillFlowNodeConfig c, float d)
         {
             f.Timer += d;
-            if (f.Timer >= (FP)c.FloatParam)
+            if (f.Timer >= c.FloatParam)
             {
                 return NodeResult.Success();
             }
@@ -555,7 +554,7 @@ namespace NetGame.SkillFlow
         /// 事件等待：优先订阅注入的 <see cref="ISkillEventSource"/>，事件回调到达后完成；
         /// 未注入事件源时继续轮询黑板布尔信号，以兼容 headless 测试和旧调用方。
         /// </summary>
-        private static NodeResult WaitEvent(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, FP delta)
+        private static NodeResult WaitEvent(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, float delta)
         {
             if (!frame.Subscribed)
             {
@@ -602,7 +601,7 @@ namespace NetGame.SkillFlow
         }
 
         /// <summary>超时包裹：子节点先结束 → 透传其结果；累计超时（cfg.FloatParam 秒）→ 取消子节点并返回 Timeout。</summary>
-        private static NodeResult Timeout(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult Timeout(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             if (cfg.Children.Count < 1)
             {
@@ -621,7 +620,7 @@ namespace NetGame.SkillFlow
 
             // 子节点仍在推进：累计超时帧，超时则取消子节点并返回 Timeout
             frame.Timer += delta;
-            if (frame.Timer >= (FP)cfg.FloatParam)
+            if (frame.Timer >= cfg.FloatParam)
             {
                 CancelFrame(body);
                 return NodeResult.Timeout("timeout");
@@ -631,7 +630,7 @@ namespace NetGame.SkillFlow
         }
 
         /// <summary>取消作用域：仅作“包裹 + 取消传播边界”，正常推进交给子树；边界拦截逻辑见 CancelFrame。</summary>
-        private static NodeResult CancelScope(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, FP delta)
+        private static NodeResult CancelScope(NodeFrame frame, SkillFlowNodeConfig cfg, SkillFlowContext ctx, ISkillActionHost host, float delta)
         {
             if (cfg.Children.Count < 1)
             {
@@ -704,7 +703,7 @@ namespace NetGame.SkillFlow
         }
 
         /// <summary>驱动取消边界内仍运行（脱手）的子树：遍历所有 CancelScope，推进其仍 Running 的子节点一次（Step 会递归推进该子树内部）。</summary>
-        private static void DriveDetached(NodeFrame frame, SkillFlowNodeConfig cfg, SkillExecuteComponent ec, FP delta)
+        private static void DriveDetached(NodeFrame frame, SkillFlowNodeConfig cfg, SkillExecuteComponent ec, float delta)
         {
             if (frame.Type == SkillFlowNodeType.CancelScope)
             {
